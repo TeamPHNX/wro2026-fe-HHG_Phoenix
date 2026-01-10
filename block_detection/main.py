@@ -1,15 +1,18 @@
 import numpy as np
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1' # Disable GPU to avoid CUDA library mismatch
+
 import tensorflow as tf
-from tensorflow.keras import layers, models
-from tensorflow.keras.applications import MobileNetV2
+import keras
+from keras import layers, models
 import matplotlib.pyplot as plt
 
 # Configuration
 DATA_FILE = 'processed_data.npz'
-BATCH_SIZE = 8 # Reduced to save VRAM
-EPOCHS = 20
-LEARNING_RATE = 1e-4
-IMAGE_SIZE = (224, 224)
+BATCH_SIZE = 8 # Can be increased as the model is smaller
+EPOCHS = 50 # Increased as the model is simpler and might need more epochs
+LEARNING_RATE = 1e-3 # Increased from 1e-4 for faster convergence
+IMAGE_SIZE = (100, 213) # (height, width)
 NUM_CLASSES = 3  # Background (0), Green (1), Red (2)
 
 def load_data(file_path):
@@ -57,7 +60,7 @@ def load_data(file_path):
     y_class = y_class[indices]
     
     # One-hot encode classes
-    y_class_one_hot = tf.keras.utils.to_categorical(y_class, num_classes=NUM_CLASSES)
+    y_class_one_hot = keras.utils.to_categorical(y_class, num_classes=NUM_CLASSES)
     
     # Split into train/val
     split_idx = int(0.8 * len(X))
@@ -68,23 +71,39 @@ def load_data(file_path):
     return (X_train, y_class_train, y_box_train), (X_val, y_class_val, y_box_val)
 
 def create_model():
-    # Use MobileNetV2 as backbone
-    base_model = MobileNetV2(input_shape=(224, 224, 3), include_top=False, weights='imagenet')
-    base_model.trainable = True # Fine-tune
+    inputs = layers.Input(shape=(IMAGE_SIZE[0], IMAGE_SIZE[1], 3))
     
-    inputs = layers.Input(shape=(224, 224, 3))
-    x = base_model(inputs)
+    def conv_block(x, filters):
+        x = layers.Conv2D(filters, (3, 3), padding='same')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Activation('relu')(x)
+        x = layers.Conv2D(filters, (3, 3), padding='same')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Activation('relu')(x)
+        x = layers.MaxPooling2D((2, 2))(x)
+        return x
+
+    # Feature Extractor
+    x = conv_block(inputs, 32)
+    x = conv_block(x, 64)
+    x = conv_block(x, 128)
+    x = conv_block(x, 256)
+    
     x = layers.GlobalAveragePooling2D()(x)
     
     # Classification Head
-    class_output = layers.Dense(128, activation='relu')(x)
-    class_output = layers.Dropout(0.5)(class_output)
-    class_output = layers.Dense(NUM_CLASSES, activation='softmax', name='class_output')(class_output)
+    class_x = layers.Dense(256, activation='relu')(x)
+    class_x = layers.BatchNormalization()(class_x)
+    class_x = layers.Dropout(0.3)(class_x)
+    class_x = layers.Dense(128, activation='relu')(class_x)
+    class_output = layers.Dense(NUM_CLASSES, activation='softmax', name='class_output')(class_x)
     
     # Bounding Box Head
-    box_output = layers.Dense(128, activation='relu')(x)
-    box_output = layers.Dropout(0.5)(box_output)
-    box_output = layers.Dense(4, activation='sigmoid', name='box_output')(box_output) # Sigmoid because coordinates are 0-1
+    box_x = layers.Dense(256, activation='relu')(x)
+    box_x = layers.BatchNormalization()(box_x)
+    box_x = layers.Dropout(0.3)(box_x)
+    box_x = layers.Dense(128, activation='relu')(box_x)
+    box_output = layers.Dense(4, activation='sigmoid', name='box_output')(box_x)
     
     model = models.Model(inputs=inputs, outputs=[class_output, box_output])
     return model
@@ -123,9 +142,9 @@ def train():
         epochs=EPOCHS,
         batch_size=BATCH_SIZE,
         callbacks=[
-            tf.keras.callbacks.ModelCheckpoint('models/new_best_model.keras', save_best_only=True),
-            tf.keras.callbacks.ReduceLROnPlateau(patience=3),
-            tf.keras.callbacks.EarlyStopping(patience=5)
+            keras.callbacks.ModelCheckpoint('models/new_best_model.keras', save_best_only=True),
+            keras.callbacks.ReduceLROnPlateau(patience=5),
+            keras.callbacks.EarlyStopping(patience=5)
         ]
     )
     

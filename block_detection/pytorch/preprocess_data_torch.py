@@ -3,11 +3,9 @@ import json
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
-import tensorflow as tf
-import keras
 
 # Configuration
-DATASET_PATH = '16.11._more_data - unfinished'
+DATASET_PATH = '../16.11._more_data - unfinished'
 IMAGE_SIZE = (213, 100) # (width, height)
 OUTPUT_FILE = 'processed_data.npz'
 
@@ -60,6 +58,11 @@ def parse_annotation(json_path, original_size):
         ymax = max(ys) * h_scale
         
         # Standard TF Object Detection API uses [ymin, xmin, ymax, xmax] relative to image size [0, 1]
+        # We will keep this format for consistency, but PyTorch often uses [xmin, ymin, xmax, ymax]
+        # Let's stick to the original format [ymin, xmin, ymax, xmax] normalized to [0, 1]
+        # to match the data loading expectation, or convert in main.py.
+        # Original: box_norm = [ymin / IMAGE_SIZE[1], xmin / IMAGE_SIZE[0], ymax / IMAGE_SIZE[1], xmax / IMAGE_SIZE[0]]
+        
         box_norm = [ymin / IMAGE_SIZE[1], xmin / IMAGE_SIZE[0], ymax / IMAGE_SIZE[1], xmax / IMAGE_SIZE[0]]
         
         boxes.append(box_norm)
@@ -78,6 +81,10 @@ def process_dataset():
     print(f"Scanning {DATASET_PATH}...")
     
     file_list = []
+    if not os.path.exists(DATASET_PATH):
+         print(f"Error: Dataset path {DATASET_PATH} not found.")
+         return
+
     for subdir in subdirs:
         dir_path = os.path.join(DATASET_PATH, subdir)
         if not os.path.exists(dir_path):
@@ -118,9 +125,6 @@ def process_dataset():
     
     # Convert images to a single numpy array
     X = np.array(images, dtype=np.float32)
-    
-    # Boxes and labels are Ragged (different number of objects per image), so keep as object array or list
-    # We save them as a ragged array in npz by using allow_pickle=True
     
     output_path = OUTPUT_FILE
     np.savez_compressed(output_path, images=X, boxes=np.array(all_boxes, dtype=object), labels=np.array(all_labels, dtype=object))

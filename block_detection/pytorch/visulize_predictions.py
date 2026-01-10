@@ -2,21 +2,19 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from PIL import Image, ImageTk, ImageDraw, ImageFont
 import numpy as np
+import torch
+import torch.nn as nn
 import os
-
-# Set environment variable to disable GPU and bypass CUDA/cuDNN version mismatch errors
-# os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-
-import tensorflow as tf
 import random
 import glob
 import cv2
 import time
 
 # Configuration
-MODEL_PATH = 'models/new_best_model.keras'
+MODEL_PATH = 'models/new_best_model.pth'
 DATASET_PATH = 'testing_data'
 IMAGE_SIZE = (213, 100) # (width, height)
+NUM_CLASSES = 3
 
 # Class mapping
 CLASS_MAP = {
@@ -31,20 +29,125 @@ COLORS = {
     2: '#ff0000'  # Red
 }
 
+# Check for GPU
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Define the model architecture (must match training)
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1):
+        super(ResidualBlock, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels)
+            )
+
+    def forward(self, x):
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += self.shortcut(x)
+        out = self.relu(out)
+        return out
+
+class BlockDetector(nn.Module):
+    def __init__(self):
+        super(BlockDetector, self).__init__()
+        
+        # Ultra High-Capacity Feature Extractor
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            
+            ResidualBlock(64, 64, stride=1),
+            ResidualBlock(64, 64, stride=1),
+            ResidualBlock(64, 64, stride=1),
+            nn.MaxPool2d(2),
+            
+            ResidualBlock(64, 128, stride=1),
+            ResidualBlock(128, 128, stride=1),
+            ResidualBlock(128, 128, stride=1),
+            ResidualBlock(128, 128, stride=1),
+            nn.MaxPool2d(2),
+            
+            ResidualBlock(128, 256, stride=1),
+            ResidualBlock(256, 256, stride=1),
+            ResidualBlock(256, 256, stride=1),
+            ResidualBlock(256, 256, stride=1),
+            ResidualBlock(256, 256, stride=1),
+            ResidualBlock(256, 256, stride=1),
+            nn.MaxPool2d(2),
+            
+            ResidualBlock(256, 512, stride=1),
+            ResidualBlock(512, 512, stride=1),
+            ResidualBlock(512, 512, stride=1),
+            
+            ResidualBlock(512, 1024, stride=1),
+            ResidualBlock(1024, 1024, stride=1),
+            
+            nn.AdaptiveAvgPool2d((1, 1))
+        )
+        
+        # Massive Classification Head
+        self.class_head = nn.Sequential(
+            nn.Linear(1024, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(512, 256),
+            nn.ReLU(inplace=True),
+            nn.Linear(256, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, NUM_CLASSES)
+        )
+        
+        # Massive Bounding Box Head
+        self.box_head = nn.Sequential(
+            nn.Linear(1024, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(512, 256),
+            nn.ReLU(inplace=True),
+            nn.Linear(256, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, 4),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = torch.flatten(x, 1)
+        
+        class_out = self.class_head(x)
+        box_out = self.box_head(x)
+        
+        return class_out, box_out
+
 class ObjectDetectionApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Phoenix Block Detection - Advanced Viewer")
+        self.root.title("Phoenix Block Detection - Advanced Viewer (PyTorch)")
         self.root.geometry("1000x850")
         self.root.configure(bg="#1e1e1e") # Dark theme
 
         # Load Model
         try:
             print("Loading model...")
-            # Ensure TensorFlow does not try to use any GPU devices
-            tf.config.set_visible_devices([], 'GPU')
-            self.model = tf.keras.models.load_model(MODEL_PATH)
-            print("Model loaded successfully.")
+            self.model = BlockDetector().to(device)
+            # Check if model file exists before loading
+            if os.path.exists(MODEL_PATH):
+                self.model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+                self.model.eval()
+                print("Model loaded successfully.")
+            else:
+                print(f"Warning: Model file {MODEL_PATH} not found.")
+                self.model = None
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load model: {e}")
             self.model = None
@@ -107,7 +210,7 @@ class ObjectDetectionApp:
         self.content_area.pack(side="right", fill="both", expand=True, padx=20, pady=20)
 
         # Title
-        tk.Label(self.content_area, text="Phoenix Block Logic Visualizer", font=("Helvetica", 18, "bold"), bg="#1e1e1e", fg="#3498db").pack(pady=(0, 10))
+        tk.Label(self.content_area, text="Phoenix Block Logic Visualizer (PyTorch)", font=("Helvetica", 18, "bold"), bg="#1e1e1e", fg="#3498db").pack(pady=(0, 10))
 
         # Image Display Area
         self.image_frame = tk.Frame(self.content_area, bg="#121212", bd=0)
@@ -149,7 +252,7 @@ class ObjectDetectionApp:
         self.result_label.pack(pady=5)
 
         # Status Bar
-        self.status_bar = tk.Label(self.root, text="Model Status: Loaded" if self.model else "Model Status: Error", 
+        self.status_bar = tk.Label(self.root, text="Model Status: Loaded" if self.model else "Model Status: Not Loaded", 
                                  bd=1, relief="sunken", anchor="w", bg="#2d2d2d", fg="#888", font=("Helvetica", 8))
         self.status_bar.pack(side="bottom", fill="x")
 
@@ -166,13 +269,16 @@ class ObjectDetectionApp:
             # 1. Load and Preprocess for Model
             img_resized = original_image.resize(IMAGE_SIZE)
             img_array = np.array(img_resized, dtype=np.float32)
-            # Simple [0, 1] normalization to match current preprocessing
+            # Normalize
             img_array = img_array / 255.0
-            img_batch = np.expand_dims(img_array, axis=0)
+            
+            # PyTorch: (H, W, C) -> (C, H, W)
+            # Add batch dimension: (1, C, H, W)
+            img_tensor = torch.FloatTensor(img_array).permute(2, 0, 1).unsqueeze(0).to(device)
 
             display_image = original_image.copy()
             
-            # Smart Scaling to fit canvas (Upscale or Downscale)
+            # Smart Scaling to fit canvas
             img_w, img_h = display_image.size
             canvas_w, canvas_h = self.canvas_size
             
@@ -190,56 +296,59 @@ class ObjectDetectionApp:
             # 2. Inference
             if self.model:
                 start_time = time.time()
-                predictions = self.model.predict(img_batch, verbose=0)
-                inference_time = time.time() - start_time
+                with torch.no_grad():
+                    class_out, box_out = self.model(img_tensor)
+                    
+                    # Apply Softmax for class probabilities
+                    class_probs = torch.softmax(class_out, dim=1)
+                    
+                    # Get max confidence
+                    max_conf, max_idx = torch.max(class_probs, 1)
+                    confidence = max_conf.item()
+                    predicted_class_idx = max_idx.item()
+                    
+                    # Get Box
+                    box_norm = box_out[0].cpu().numpy()
                 
-                class_probs = predictions[0][0]
-                box_pred = predictions[1][0]
-                
-                predicted_class_idx = np.argmax(class_probs)
-                confidence = np.max(class_probs)
-                
-                # 3. Visualization
-                if self.show_overlay.get() and confidence >= self.conf_threshold.get():
-                    draw = ImageDraw.Draw(display_image)
-                    w, h = display_image.size
+                inference_time = (time.time() - start_time) * 1000
+
+                if confidence >= self.conf_threshold.get() and predicted_class_idx > 0:
+                    label_text = CLASS_MAP.get(predicted_class_idx, "Unknown")
                     
-                    ymin, xmin, ymax, xmax = box_pred
-                    
-                    left = max(0, min(xmin, 1)) * w
-                    right = max(0, min(xmax, 1)) * w
-                    top = max(0, min(ymin, 1)) * h
-                    bottom = max(0, min(ymax, 1)) * h
-                    
-                    color = COLORS.get(predicted_class_idx, 'blue')
-                    label_text = CLASS_MAP.get(predicted_class_idx, 'Unknown')
-                    
-                    # Draw Box
-                    if predicted_class_idx != 0:
-                        # Better box: semi-transparent or just thick
+                    if self.show_overlay.get():
+                        draw = ImageDraw.Draw(display_image)
+                        
+                        ymin, xmin, ymax, xmax = box_norm
+                        
+                        # Scale back to display image size
+                        # Box is relative [0,1]
+                        left = xmin * new_w
+                        right = xmax * new_w
+                        top = ymin * new_h
+                        bottom = ymax * new_h
+                        
+                        color = COLORS.get(predicted_class_idx, 'white')
+                        
                         draw.rectangle([left, top, right, bottom], outline=color, width=3)
                         
+                        # Draw label background
                         try:
-                            font = ImageFont.truetype("DejaVuSans-Bold.ttf", 14)
-                        except:
+                            font = ImageFont.truetype("arial.ttf", 16)
+                        except IOError:
                             font = ImageFont.load_default()
                             
-                        text = f"{label_text} {confidence:.1%}"
+                        text_w = font.getlength(f"{label_text} {confidence:.0%}")
+                        text_h = 16
                         
-                        try:
-                            text_bbox = draw.textbbox((left, top), text, font=font)
-                            draw.rectangle([text_bbox[0]-2, text_bbox[1]-2, text_bbox[2]+2, text_bbox[3]+2], fill=color)
-                            draw.text((left, top-2), text, fill="white", font=font)
-                        except:
-                            draw.text((left + 2, top + 2), text, fill=color, font=font)
-                
-                if confidence < self.conf_threshold.get():
-                    label_text = "Background (below threshold)"
+                        draw.rectangle([left, top - text_h - 4, left + text_w + 4, top], fill=color)
+                        draw.text((left + 2, top - text_h - 2), f"{label_text} {confidence:.0%}", fill='black', font=font)
 
             self.update_display(display_image, label_text, confidence, predicted_class_idx, inference_time)
                 
         except Exception as e:
             print(f"Error in prediction/visualization: {e}")
+            import traceback
+            traceback.print_exc()
 
     def load_video(self):
         file_path = filedialog.askopenfilename(filetypes=[("Video or Data files", "*.mp4 *.avi *.mov *.mkv *.npz")])
@@ -248,40 +357,32 @@ class ObjectDetectionApp:
             
             if file_path.lower().endswith('.npz'):
                 try:
-                    data = np.load(file_path)
-                    if 'images' in data:
-                        self.frames = data['images']
-                        self.video_mode = 'npz'
-                        self.current_frame_idx = 0
-                        self.scrub_bar.config(from_=0, to=len(self.frames)-1)
-                        self.video_running = True
-                        self.is_paused = False
-                        self.btn_play.config(text="⏸")
-                        self.play_video()
-                        self.status_bar.config(text=f"Loaded NPZ: {os.path.basename(file_path)} ({len(self.frames)} frames)")
-                    else:
-                        messagebox.showerror("Error", "NPZ file does not contain 'images' key.")
+                    with np.load(file_path, allow_pickle=True) as data:
+                        if 'images' in data:
+                            self.frames = data['images'] # (N, H, W, 3)
+                            self.video_mode = 'npz'
+                            self.current_frame_idx = 0
+                            self.scrub_bar.config(to=len(self.frames)-1)
+                            self.status_bar.config(text=f"Loaded NPZ: {len(self.frames)} frames")
+                            self.show_current_frame()
+                        else:
+                            messagebox.showerror("Error", "NPZ does not contain 'images' key")
                 except Exception as e:
-                    messagebox.showerror("Error", f"Failed to load NPZ file: {e}")
+                     messagebox.showerror("Error", f"Failed to load NPZ: {e}")
             else:
                 self.cap = cv2.VideoCapture(file_path)
-                if not self.cap.isOpened():
-                    messagebox.showerror("Error", "Could not open video file.")
-                    return
-                
-                total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                if total_frames > 0:
-                    self.scrub_bar.config(from_=0, to=total_frames-1)
-                
-                self.video_mode = 'video'
-                self.video_running = True
-                self.is_paused = False
-                self.btn_play.config(text="⏸")
-                self.play_video()
-                self.status_bar.config(text=f"Loaded Video: {os.path.basename(file_path)}")
+                if self.cap.isOpened():
+                    self.video_mode = 'video'
+                    total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    self.scrub_bar.config(to=total_frames)
+                    self.status_bar.config(text=f"Loaded Video: {total_frames} frames")
+                    self.show_current_frame()
 
     def toggle_playback(self):
         if not self.video_running:
+            self.video_running = True
+            self.is_paused = False
+            self.play_video()
             return
         
         self.is_paused = not self.is_paused
@@ -290,7 +391,11 @@ class ObjectDetectionApp:
             self.play_video()
 
     def next_frame(self):
-        if not self.video_running: return
+        if not self.video_running and self.video_mode:
+             # Allow stepping even if not running usually, but let's assume we need to start it first or just update pointer
+             self.video_running = True 
+             self.is_paused = True
+
         self.is_paused = True
         self.btn_play.config(text="▶")
         
@@ -303,13 +408,16 @@ class ObjectDetectionApp:
             self.show_current_frame()
 
     def prev_frame(self):
-        if not self.video_running: return
+        if not self.video_running and self.video_mode:
+             self.video_running = True
+             self.is_paused = True
+
         self.is_paused = True
         self.btn_play.config(text="▶")
         
         if self.video_mode == 'video' and self.cap:
             curr = self.cap.get(cv2.CAP_PROP_POS_FRAMES)
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, curr - 2)) # -2 because read() advances one
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, curr - 2)) 
             self.show_current_frame()
         elif self.video_mode == 'npz':
             self.current_frame_idx = max(0, self.current_frame_idx - 1)
@@ -320,77 +428,70 @@ class ObjectDetectionApp:
         if self.video_mode == 'video' and self.cap:
             ret, frame = self.cap.read()
             if ret:
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                self.predict_and_visualize(Image.fromarray(frame_rgb))
-                self.scrub_bar.set(int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)))
+                # CV2 is BGR, PIL is RGB
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(frame)
+                self.predict_and_visualize(img)
+                
+                curr = self.cap.get(cv2.CAP_PROP_POS_FRAMES)
+                self.scrub_var.set(curr)
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, curr) # Rewind the read
         elif self.video_mode == 'npz' and self.frames is not None:
             frame_data = self.frames[self.current_frame_idx]
-            # Handle float32 data in range [0, 1] or [-1, 1]
-            if frame_data.dtype == np.float32:
-                if frame_data.min() < 0:
-                    # [-1, 1] -> [0, 255]
-                    frame_data = ((frame_data + 1) / 2.0 * 255).astype(np.uint8)
-                else:
-                    # [0, 1] -> [0, 255]
-                    frame_data = (frame_data * 255).astype(np.uint8)
+            
+            # De-normalize if needed (assuming stored as 0-1 float or 0-255 uint8)
+            if frame_data.dtype == np.float32 or (frame_data.max() <= 1.05 and frame_data.min() >= -0.05):
+                frame_data = (frame_data * 255).astype(np.uint8)
             else:
                 frame_data = frame_data.astype(np.uint8)
             
-            # Restore original aspect ratio for NPZ data (213x100)
+            # NPZ usually stores as RGB if saved from PIL
             img = Image.fromarray(frame_data)
-            img = img.resize((213, 100))
+            # Resize if needed to match original aspect, but dataset might be resized already
+            # processed_data.npz stores resized images usually (213, 100)
             
             self.predict_and_visualize(img)
-            self.scrub_bar.set(self.current_frame_idx)
+            self.scrub_var.set(self.current_frame_idx)
+
 
     def on_scrub(self, value):
-        if not self.video_running: return
+        if not self.video_running and self.video_mode:
+            self.video_running = True
+            self.is_paused = True
+            
         val = int(float(value))
         
         if self.video_mode == 'video' and self.cap:
              self.cap.set(cv2.CAP_PROP_POS_FRAMES, val)
+             self.show_current_frame()
         elif self.video_mode == 'npz':
-             self.current_frame_idx = val
+             self.current_frame_idx = min(len(self.frames)-1, max(0, val))
+             self.show_current_frame()
         
         if self.is_paused:
-            self.show_current_frame()
+             self.btn_play.config(text="▶")
 
     def play_video(self):
         if not self.video_running or self.is_paused:
             return
 
         if self.video_mode == 'video' and self.cap and self.cap.isOpened():
-            curr_pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
-            self.scrub_bar.set(curr_pos)
-
             ret, frame = self.cap.read()
             if ret:
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                self.predict_and_visualize(Image.fromarray(frame_rgb))
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(frame)
+                self.predict_and_visualize(img)
+                
+                curr = self.cap.get(cv2.CAP_PROP_POS_FRAMES)
+                self.scrub_var.set(curr)
+                
                 self.root.after(self.playback_speed.get(), self.play_video)
             else:
                 self.stop_video()
                 
         elif self.video_mode == 'npz' and self.frames is not None:
             if self.current_frame_idx < len(self.frames):
-                self.scrub_bar.set(self.current_frame_idx)
-                
-                frame_data = self.frames[self.current_frame_idx]
-                if frame_data.dtype == np.float32:
-                    if frame_data.min() < 0:
-                        # [-1, 1] -> [0, 255]
-                        frame_data = ((frame_data + 1) / 2.0 * 255).astype(np.uint8)
-                    else:
-                        # [0, 1] -> [0, 255]
-                        frame_data = (frame_data * 255).astype(np.uint8)
-                else:
-                    frame_data = frame_data.astype(np.uint8)
-                
-                # Restore original aspect ratio for NPZ data (213x100)
-                img = Image.fromarray(frame_data)
-                img = img.resize((213, 100))
-                
-                self.predict_and_visualize(img)
+                self.show_current_frame()
                 self.current_frame_idx += 1
                 self.root.after(self.playback_speed.get(), self.play_video)
             else:
@@ -424,15 +525,14 @@ class ObjectDetectionApp:
         color = COLORS.get(class_idx, '#ffffff')
         perf_text = ""
         if inference_time is not None:
-            fps = 1.0 / inference_time if inference_time > 0 else 0
-            perf_text = f" | {inference_time*1000:.1f}ms ({fps:.1f} FPS)"
+            perf_text = f" | {inference_time:.1f}ms"
             
         self.result_label.config(text=f"{label} ({conf:.1%}){perf_text}", fg=color)
 
     def load_random_image(self):
         self.stop_video()
         if not self.all_images:
-            messagebox.showwarning("Warning", "No images found in dataset directory.")
+            messagebox.showinfo("Info", "No images found in dataset.")
             return
         
         file_path = random.choice(self.all_images)
@@ -443,8 +543,8 @@ class ObjectDetectionApp:
         self.stop_video()
         file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.png *.jpg *.jpeg")])
         if file_path:
-            self.status_bar.config(text=f"Loaded File: {os.path.basename(file_path)}")
-            self.process_image(file_path)
+             self.status_bar.config(text=f"Loaded: {os.path.basename(file_path)}")
+             self.process_image(file_path)
 
 if __name__ == "__main__":
     root = tk.Tk()
